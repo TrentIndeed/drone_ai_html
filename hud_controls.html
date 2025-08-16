@@ -333,7 +333,6 @@ function updateDrone(dt){
   tilt.pitch += tilt.pitchVel*dt;
   tilt.roll += tilt.rollVel*dt;
   const yawSlipOff = clamp(yawRateFilt*0.12,-1,1)*LEAN.yawSlip;
-  bodyHolder.rotation.set(tilt.pitch, modelYawOffset + yawSlipOff, tilt.roll);
 
   // --- NEW PHYSICS MODEL ---
   const g = 9.81;
@@ -362,6 +361,25 @@ function updateDrone(dt){
   // Apply acceleration (a = F/m)
   const accel = totalForce.clone().divideScalar(mass);
   droneState.vel.addScaledVector(accel, dt);
+
+  // --- VISUAL ORIENTATION ---
+  // Make the drone lean into its direction of travel (velocity)
+  const inverseYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), -droneState.yaw);
+  const localVel = droneState.vel.clone().applyQuaternion(inverseYaw);
+
+  const PUSH_PITCH_FACTOR = 0.01; // How much to pitch forward based on forward speed
+  const PUSH_ROLL_FACTOR = 0.015; // How much to roll based on sideways speed
+
+  // Positive forward velocity (localVel.z) should create positive pitch (nose down)
+  const visualPitchOffset = localVel.z * PUSH_PITCH_FACTOR;
+  // Positive sideways velocity (localVel.x, moving right) should create negative roll (roll left)
+  const visualRollOffset = -localVel.x * PUSH_ROLL_FACTOR;
+
+  bodyHolder.rotation.set(
+    clamp(tilt.pitch + visualPitchOffset, -LEAN.maxPitch * 1.5, LEAN.maxPitch * 1.5),
+    modelYawOffset + yawSlipOff,
+    clamp(tilt.roll + visualRollOffset, -LEAN.maxRoll * 1.5, LEAN.maxRoll * 1.5)
+  );
 
   // Update position
   droneRoot.position.addScaledVector(droneState.vel, dt);
