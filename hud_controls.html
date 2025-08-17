@@ -16,7 +16,9 @@
   #ui button:hover { background:#16222a; }
   #status { position:fixed; right:12px; top:12px; color:#cfe6ff; background:rgba(12,18,24,.55); border:1px solid rgba(255,255,255,.12); padding:8px 10px; border-radius:10px; font-weight:700; letter-spacing:.3px; z-index:10; }
   #alert { position:fixed; top:0; left:0; right:0; padding:10px 14px; background:#2b1b1b; color:#ffd9d9; border-bottom:1px solid #533; display:none; z-index:20; }
+  #alert.success { background:#1b2b1b; color:#d9ffd9; border-bottom-color:#353; }
   #credit { position:fixed; right:10px; bottom:10px; opacity:.7; color:#a7c0d9; font-size:12px; z-index:10; }
+  #connRate { position:fixed; right:10px; bottom:30px; opacity:.8; color:#a7c0d9; font-size:12px; z-index:10; font-weight:600; }
   canvas { display:block; }
   /* HUD Joystick */
   #hud { position:fixed; right:12px; top:54px; z-index:10; display:flex; flex-direction:column; align-items:flex-end; gap:6px; color:#cfe6ff; }
@@ -46,6 +48,7 @@
     <div class="label">Stopwatch</div><div class="value" id="time">00:00.000</div>
     <div class="label">Best Time</div><div class="value" id="best">—</div>
     <div class="label">Run Kills</div><div class="value" id="kills">0 / 5</div>
+    <div class="label">Targets Left</div><div class="value" id="targetsLeft">10</div>
     <div class="label">Total Kills</div><div class="value" id="total">0</div>
     <div class="label">Resets</div><div class="value" id="resets">0</div>
   </div>
@@ -61,6 +64,7 @@
   </div>
 </div>
 <div id="status">SEARCHING…</div>
+<div id="connRate">Conn: ... Hz</div>
 <div id="hud">
   <div id="joy"><div id="joyDot"></div></div>
   <div class="legend">AI Controls (Heading ↔ / Pitch ↕)</div>
@@ -76,7 +80,13 @@ import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { SimplexNoise } from 'three/examples/jsm/math/SimplexNoise.js';
 
 // -------------------- utils --------------------
-const showAlert=(msg)=>{const el=document.getElementById('alert'); el.textContent=msg; el.style.display='block'; setTimeout(()=>el.style.display='none', 6000);} ;
+const showAlert=(msg, isSuccess=false)=>{
+  const el=document.getElementById('alert'); 
+  el.textContent=msg; 
+  el.className = isSuccess ? 'success' : '';
+  el.style.display='block'; 
+  setTimeout(()=>el.style.display='none', 6000);
+};
 const rand=(a,b)=>a+Math.random()*(b-a);
 const clamp=THREE.MathUtils.clamp; const lerp=(a,b,t)=>a+(b-a)*t; const deg=THREE.MathUtils.degToRad;
 const FT_TO_M=0.3048;
@@ -187,21 +197,86 @@ function makePlaceholderRunner(){
   body.castShadow=body.receiveShadow=true; g.add(body);
   return g;
 }
-function flatRandomSpawn(avoid=null,minDist=40){ for(let i=0;i<60;i++){ const x=rand(-HALF*0.9, HALF*0.9), z=rand(-HALF*0.9, HALF*0.9); if(!inBounds(x,z)) continue; const y=getHeightAt(x,z); if(getNormalAt(x,z).y<0.7) continue; const p=new THREE.Vector3(x,y,z); if(avoid&&p.distanceTo(avoid)<minDist) continue; return p; } return new THREE.Vector3(0,getHeightAt(0,0),0); }
-function spawnRunners(){
-  for(const r of runners){ if(r.obj?.parent) scene.remove(r.obj); r.mixer?.stopAllAction?.(); }
-  runners.length=0;
-  for(let i=0;i<RUNNER_COUNT;i++){
-    const p=flatRandomSpawn(droneRoot.position,60);
-    let s, mixer=null, chest=1.0*RUNNER_SCALE;
-    if(soldierGLB){ s=SkeletonUtils.clone(soldierGLB.scene); s.traverse(o=>{ if(o.isMesh){ o.castShadow=true; o.receiveShadow=true; } });
-      s.scale.set(RUNNER_SCALE,RUNNER_SCALE,RUNNER_SCALE);
-      if(soldierClips && soldierClips.length){ mixer=new THREE.AnimationMixer(s); const runClip=soldierClips.find(c=>/run/i.test(c.name))||soldierClips[0]; const act=mixer.clipAction(runClip); act.reset(); act.setLoop(THREE.LoopRepeat,Infinity); act.timeScale=1.2; act.play(); }
-    } else {
-      s=makePlaceholderRunner(); chest=0.9*RUNNER_SCALE; s.scale.set(RUNNER_SCALE,RUNNER_SCALE,RUNNER_SCALE);
+function flatRandomSpawn() {
+  // Finds a single valid point on the terrain, without any avoidance checks.
+  for (let i = 0; i < 60; i++) { 
+    const x = rand(-HALF * 0.9, HALF * 0.9), z = rand(-HALF * 0.9, HALF * 0.9);
+    if (!inBounds(x, z)) continue;
+    const y = getHeightAt(x, z);
+    if (getNormalAt(x, z).y < 0.7) continue; // Avoid steep slopes
+    return new THREE.Vector3(x, y, z);
+  }
+  return new THREE.Vector3(0, getHeightAt(0, 0), 0); // Fallback
+}
+
+function spawnRunners() {
+  // Clear existing runners
+  for (const r of runners) {
+    if (r.obj?.parent) scene.remove(r.obj);
+    r.mixer?.stopAllAction?.();
+  }
+  runners.length = 0;
+
+  const DRONE_AVOID_DIST_SQ = 60 * 60;
+  const RUNNER_AVOID_DIST_SQ = 25 * 25;
+  
+  // 1. Generate a pool of potential spawn points
+  const potentialSpawns = [];
+  for (let i = 0; i < RUNNER_COUNT * 15; i++) { // Generate more candidates than needed
+      potentialSpawns.push(flatRandomSpawn());
+  }
+
+  // 2. Filter out points too close to the drone
+  const validSpawns = potentialSpawns.filter(p => p.distanceToSquared(droneRoot.position) > DRONE_AVOID_DIST_SQ);
+
+  // 3. Iteratively select final spawn positions, ensuring they are not too close to each other
+  const finalPositions = [];
+  while (finalPositions.length < RUNNER_COUNT && validSpawns.length > 0) {
+    // Pick a random point from the valid list
+    const randomIndex = Math.floor(Math.random() * validSpawns.length);
+    const candidate = validSpawns.splice(randomIndex, 1)[0];
+    
+    finalPositions.push(candidate);
+
+    // Remove any remaining points from the valid list that are too close to the one we just added
+    for (let i = validSpawns.length - 1; i >= 0; i--) {
+      if (validSpawns[i].distanceToSquared(candidate) < RUNNER_AVOID_DIST_SQ) {
+        validSpawns.splice(i, 1);
+      }
     }
-    s.position.copy(p); scene.add(s);
-    runners.push({ obj:s, mixer, alive:true, vel:new THREE.Vector3(), radius:0.7*RUNNER_SCALE, chestOffset:chest, hp:1, hpMax:1, hb:null });
+  }
+
+  // If we couldn't find enough spaced-out points, fill the rest without spacing constraints
+  while (finalPositions.length < RUNNER_COUNT) {
+      finalPositions.push(flatRandomSpawn());
+      console.warn("Could not find enough spaced-out spawn points. Some runners may be close.");
+  }
+
+
+  // 4. Spawn a runner at each final position
+  for (const p of finalPositions) {
+    let s, mixer = null, chest = 1.0 * RUNNER_SCALE;
+    if (soldierGLB) {
+      s = SkeletonUtils.clone(soldierGLB.scene);
+      s.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+      s.scale.set(RUNNER_SCALE, RUNNER_SCALE, RUNNER_SCALE);
+      if (soldierClips && soldierClips.length) {
+        mixer = new THREE.AnimationMixer(s);
+        const runClip = soldierClips.find(c => /run/i.test(c.name)) || soldierClips[0];
+        const act = mixer.clipAction(runClip);
+        act.reset();
+        act.setLoop(THREE.LoopRepeat, Infinity);
+        act.timeScale = 1.2;
+        act.play();
+      }
+    } else {
+      s = makePlaceholderRunner();
+      chest = 0.9 * RUNNER_SCALE;
+      s.scale.set(RUNNER_SCALE, RUNNER_SCALE, RUNNER_SCALE);
+    }
+    s.position.copy(p);
+    scene.add(s);
+    runners.push({ obj: s, mixer, alive: true, vel: new THREE.Vector3(), radius: 0.7 * RUNNER_SCALE, chestOffset: chest, hp: 1, hpMax: 1, hb: null });
   }
 }
 
@@ -210,11 +285,11 @@ function makeHealthBar(){ const g=new THREE.Group(); const bg=new THREE.Mesh(new
 function applyHealthBar(hb, pct){ const w=1.6; hb.userData.fg.scale.x = Math.max(0,pct); hb.userData.fg.position.x = -0.8 + (pct*w)/2 - w/2; hb.userData.fg.material.color.setHSL( clamp(pct,0,1)*0.33, 1, 0.5 ); }
 
 // -------------------- UI --------------------
-const ui={ time:document.getElementById('time'), best:document.getElementById('best'), kills:document.getElementById('kills'), total:document.getElementById('total'), resets:document.getElementById('resets'), btnReset:document.getElementById('btnReset'), btnSlow:document.getElementById('btnSlow'), sel:document.getElementById('droneSelect'), status:document.getElementById('status') };
+const ui={ time:document.getElementById('time'), best:document.getElementById('best'), kills:document.getElementById('kills'), total:document.getElementById('total'), resets:document.getElementById('resets'), btnReset:document.getElementById('btnReset'), btnSlow:document.getElementById('btnSlow'), sel:document.getElementById('droneSelect'), status:document.getElementById('status'), targetsLeft: document.getElementById('targetsLeft') };
 const LS={ best:'droneForest_bestMs', total:'droneForest_totalKills', resets:'droneForest_resets' };
 let bestMs=Number(localStorage.getItem(LS.best)||0)||null, totalKills=Number(localStorage.getItem(LS.total)||0)||0, resets=Number(localStorage.getItem(LS.resets)||0)||0, runKills=0, runStart=0, running=false;
 function fmt(ms){ const m=Math.floor(ms/60000), s=Math.floor((ms%60000)/1000), ms3=Math.floor(ms%1000); return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(ms3).padStart(3,'0')}`; }
-function updateUI(){ ui.time.textContent=running?fmt(performance.now()-runStart):'00:00.000'; ui.best.textContent=bestMs!=null?fmt(bestMs):'—'; ui.kills.textContent=`${runKills} / ${RUNNER_COUNT}`; ui.total.textContent=''+totalKills; ui.resets.textContent=''+resets; }
+function updateUI(){ ui.time.textContent=running?fmt(performance.now()-runStart):'00:00.000'; ui.best.textContent=bestMs!=null?fmt(bestMs):'—'; ui.kills.textContent=`${runKills} / ${RUNNER_COUNT}`; ui.total.textContent=''+totalKills; ui.resets.textContent=''+resets; ui.targetsLeft.textContent = `${RUNNER_COUNT - runKills}`; }
 ui.btnReset.onclick=()=> resetMatch(); ui.btnSlow.onclick=()=>{ timeScale=(timeScale===1 ? .3 : 1); ui.btnSlow.textContent=timeScale===1?'Toggle Slow-Mo':'Slow-Mo: ON'; };
 ui.sel.addEventListener('change', (e)=>{ const k=e.target.value; const P=droneRoot.position.clone(); const Y=droneState.yaw; setDroneType(k); droneRoot.position.copy(P); droneRoot.rotation.set(0,Y,0); });
 function setStatus(found){ ui.status.textContent = found? 'FOUND TARGET' : 'SEARCHING…'; ui.status.style.color = found? '#9fffb0' : '#cfe6ff'; }
@@ -266,113 +341,142 @@ const LEAN={ maxPitch:deg(22), maxRoll:deg(32), yawSlip:deg(4), yawFilter:12, vz
 const TILT={ kp:22, kd:10 }; const AERO={ accelPitch:90, accelRoll:100, speedGain:5.0, drag:0.36, maxSpeedScale:1.3 };
 let tilt={ pitch:0, roll:0, pitchVel:0, rollVel:0 };
 const DRONE_CLEAR=3.0;
+let lastControls = { yaw: 0, throttle: 0, pitch: 0, roll: 0 };
+let serverError = false;
+let responseCounter = 0;
+
+async function getAIControls(dt) {
+  // --- Client-Side Target Acquisition ---
+  // On every frame, find the best visible target. This is a stateless approach.
+  const visibleTargetData = findVisibleTarget();
+  const currentTarget = visibleTargetData ? visibleTargetData.target : null;
+
+  // Now, send the authoritative state to the server.
+  const fwd = getForwardFromYaw(droneState.yaw);
+  const payload = {
+    dt: dt,
+    drone: {
+      position: droneRoot.position,
+      velocity: droneState.vel,
+      yaw: droneState.yaw,
+      targetAlt: droneState.targetAlt,
+      speed: droneState.speed,
+      maxTurn: droneState.maxTurn,
+    },
+    lockedTarget: currentTarget ? {
+      position: currentTarget.obj.position,
+      velocity: currentTarget.vel,
+    } : null,
+    terrain: {
+      height_at_drone: getHeightAt(droneRoot.position.x, droneRoot.position.z),
+      ahead_max_height: terrainAheadMaxHeight(droneRoot.position, fwd),
+    },
+    obstacles: obstacles,
+    searchState: searchState,
+  };
+
+  try {
+    const response = await fetch('http://127.0.0.1:5000/get_controls', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+    
+    const data = await response.json();
+    
+    // Defensively check the server response to prevent crashes
+    if (data && data.controls && typeof data.controls.yaw === 'number') {
+      // Update hud controls from server response
+      hud.yaw = data.controls.yaw;
+      hud.throttle = data.controls.throttle;
+      hud.pitch = data.controls.pitch;
+
+      // Update status text based on what the authoritative server tells us
+      setStatus(data.droneStatus === 'HUNTING');
+      
+      // Update search state if it exists
+      if (data.searchState) {
+        searchState = data.searchState;
+      }
+
+      responseCounter++; // Increment for successful response
+
+      if (serverError) {
+        serverError = false;
+        showAlert('Successfully reconnected to AI server.', true);
+      }
+    } else {
+      throw new Error('Invalid or incomplete data from AI server.');
+    }
+
+  } catch (e) {
+    if (!serverError) {
+      serverError = true;
+      console.error('AI Server request failed:', e);
+      showAlert('Connection to AI server failed or server returned invalid data. Check console for details. Drone will be unresponsive.');
+    }
+    // In case of error, zero out controls to prevent NaN propagation
+    hud.yaw = 0;
+    hud.throttle = 0;
+    hud.pitch = 0;
+  }
+}
+
 
 function updateDrone(dt){
-  // rotor visuals
-  rotorSpin+=dt*20; for(const d of rotorDiscs) d.rotation.x=rotorSpin;
+  // Get AI inputs from the server asynchronously
+  getAIControls(dt);
 
-  // target or search
-  // If we have a target and it's dead, forget it.
-  if (lockedTarget && !lockedTarget.alive) {
-    lockedTarget = null;
-  }
+  // --- PHYSICS & VISUALS ---
+  // The AI server now dictates hud.yaw, hud.pitch, and hud.throttle.
+  // This function just applies the physics based on those commands.
 
-  // If we don't have a target, try to find one.
-  if (!lockedTarget) {
-    const vis = findVisibleTarget();
-    if (vis && vis.target) {
-      lockedTarget = vis.target;
-    }
-  }
-  
-  let desiredDir; let engaging=false;
-  if(lockedTarget){ // If we have a target (and we know it's alive from above)
-    const toT=lockedTarget.obj.position.clone().sub(droneRoot.position); toT.y=0; if(lockedTarget.vel){ const lead=lockedTarget.vel.clone().setY(0).multiplyScalar(0.6); toT.add(lead); } desiredDir=(toT.lengthSq()>1e-6? toT.normalize(): getForwardDir()); engaging=true; setStatus(true);
-  } else { // No target, so search
-    setStatus(false); if(!searchState.inited) initSearchSweep(); updateSearchSweep(dt); const yawT=searchState.yawTarget; const raw=new THREE.Vector3(Math.cos(yawT),0,Math.sin(yawT)); if(!droneState.seekDir) droneState.seekDir=raw.clone(); const a=1-Math.exp(-dt*2.2); desiredDir=droneState.seekDir.lerp(raw,a).normalize();
-  }
-
-  // avoidance & boundary field
-  desiredDir = desiredDir.add(steerAvoid(droneRoot.position, desiredDir)).normalize();
-
-  // --- AI CONTROLS ---
-  // 1. YAW CONTROL: Determine turn rate to face the desired direction
-  const desiredYaw = Math.atan2(desiredDir.z, desiredDir.x);
-  const yawError = wrapAngle(desiredYaw - droneState.yaw);
-  const commandedYawRate = clamp(yawError / Math.max(dt, 1e-5), -droneState.maxTurn, droneState.maxTurn);
-  hud.yaw = commandedYawRate / droneState.maxTurn;
+  // 1. Update Yaw based on AI command
   droneState.yaw = wrapAngle(droneState.yaw + (hud.yaw * droneState.maxTurn * dt));
-
-  // 2. ALTITUDE CONTROL: Determine throttle to maintain target altitude
-  const gy = getHeightAt(droneRoot.position.x, droneRoot.position.z);
-  const aheadMax = terrainAheadMaxHeight(droneRoot.position, getForwardFromYaw(droneState.yaw));
-  const groundRef = Math.max(gy, aheadMax);
-  const targetY = groundRef + droneState.targetAlt;
-  const climbErr = targetY - droneRoot.position.y;
-  const verticalVel = droneState.vel.y;
-  const damping = 0.9 * verticalVel; // Stronger damping
-  hud.throttle = clamp((climbErr - damping) * 0.2, -1, 1); // PD controller for throttle
-
-  // 3. PITCH CONTROL: Determine forward pitch to achieve target speed
   const fwd = getForwardFromYaw(droneState.yaw);
-  const forwardSpeed = droneState.vel.dot(fwd);
-  const accelErr = droneState.speed - forwardSpeed;
-  const pitchTgt = clamp(accelErr * 0.1, -LEAN.maxPitch, LEAN.maxPitch);
-  hud.pitch = pitchTgt / LEAN.maxPitch;
 
-  // --- BODY LEAN & TILT DYNAMICS ---
-  // Filtered yaw rate for smooth roll
-  const ay=1-Math.exp(-dt*LEAN.yawFilter); yawRateFilt += (hud.yaw * droneState.maxTurn - yawRateFilt)*ay;
-  const latSpeed=droneState.vel.clone().cross(fwd).length();
-  const rollTgt  = clamp(-yawRateFilt * LEAN.rollFromYaw - latSpeed * 0.1, -LEAN.maxRoll, LEAN.maxRoll);
-  hud.roll = rollTgt / LEAN.maxRoll;
-
-  // 2nd-order dynamics for smooth pitch/roll of the drone body
+  // 2. Smoothly update the visual tilt of the drone body
+  const pitchTgt = hud.pitch * LEAN.maxPitch;
+  const ay=1-Math.exp(-dt*LEAN.yawFilter); 
+  yawRateFilt += (hud.yaw * droneState.maxTurn - yawRateFilt)*ay;
+  const rollTgt  = clamp(-yawRateFilt * LEAN.rollFromYaw, -LEAN.maxRoll, LEAN.maxRoll);
+  
   tilt.pitchVel += (TILT.kp*(pitchTgt-tilt.pitch) - TILT.kd*tilt.pitchVel)*dt;
   tilt.rollVel += (TILT.kp*(rollTgt-tilt.roll) - TILT.kd*tilt.rollVel)*dt;
   tilt.pitch += tilt.pitchVel*dt;
   tilt.roll += tilt.rollVel*dt;
   const yawSlipOff = clamp(yawRateFilt*0.12,-1,1)*LEAN.yawSlip;
 
-  // --- NEW PHYSICS MODEL ---
+  // 3. Apply Forces
   const g = 9.81;
   const mass = 1.0;
 
-  // 1. LIFT FORCE (Vertical)
-  const liftForce = (hud.throttle + 1) * g * mass * 1.2; // Base lift counters gravity, throttle adjusts
-  const verticalForce = liftForce - (g * mass); // Net vertical force
+  const liftForce = (hud.throttle + 1) * g * mass * 1.2;
+  const verticalForce = liftForce - (g * mass);
 
-  // 2. THRUST FORCE (Horizontal)
   const THRUST_MULTIPLIER = 200.0;
   const forwardThrust = Math.sin(tilt.pitch) * THRUST_MULTIPLIER;
   const thrustVector = fwd.clone().multiplyScalar(forwardThrust);
 
-  // 3. DRAG FORCE
   const dragCoeff = 0.5;
   const dragForce = droneState.vel.clone().multiplyScalar(-dragCoeff);
 
-  // Combine forces
   const totalForce = new THREE.Vector3(
     thrustVector.x + dragForce.x,
     verticalForce + dragForce.y,
     thrustVector.z + dragForce.z
   );
 
-  // Apply acceleration (a = F/m)
   const accel = totalForce.clone().divideScalar(mass);
   droneState.vel.addScaledVector(accel, dt);
 
-  // --- VISUAL ORIENTATION ---
-  // Make the drone lean into its direction of travel (velocity)
+  // 4. Update Visual Orientation (Lean)
   const inverseYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), -droneState.yaw);
   const localVel = droneState.vel.clone().applyQuaternion(inverseYaw);
-
-  const PUSH_PITCH_FACTOR = 0.01; // How much to pitch forward based on forward speed
-  const PUSH_ROLL_FACTOR = 0.015; // How much to roll based on sideways speed
-
-  // Positive forward velocity (localVel.z) should create positive pitch (nose down)
+  const PUSH_PITCH_FACTOR = 0.01;
+  const PUSH_ROLL_FACTOR = 0.015;
   const visualPitchOffset = localVel.z * PUSH_PITCH_FACTOR;
-  // Positive sideways velocity (localVel.x, moving right) should create negative roll (roll left)
   const visualRollOffset = -localVel.x * PUSH_ROLL_FACTOR;
 
   bodyHolder.rotation.set(
@@ -381,10 +485,8 @@ function updateDrone(dt){
     clamp(tilt.roll + visualRollOffset, -LEAN.maxRoll * 1.5, LEAN.maxRoll * 1.5)
   );
 
-  // Update position
+  // 5. Update Position & Handle Collisions
   droneRoot.position.addScaledVector(droneState.vel, dt);
-
-  // --- COLLISION & BOUNDARY RESPONSE ---
   const currentGroundY = getHeightAt(droneRoot.position.x, droneRoot.position.z);
   if (droneRoot.position.y < currentGroundY + DRONE_CLEAR) {
     droneRoot.position.y = currentGroundY + DRONE_CLEAR;
@@ -397,9 +499,9 @@ function updateDrone(dt){
   if(boundaryNormal.lengthSq()>0){
     boundaryNormal.normalize();
     const vn = droneState.vel.dot(boundaryNormal);
-    if(vn > 0) droneState.vel.addScaledVector(boundaryNormal, -vn * 1.5); // Reflect and dampen
+    if(vn > 0) droneState.vel.addScaledVector(boundaryNormal, -vn * 1.5);
     const cyaw = Math.atan2(-droneRoot.position.z, -droneRoot.position.x);
-    searchState.centerYaw = lerpAngle(searchState.centerYaw || cyaw, cyaw, 0.12);
+    if (searchState) searchState.centerYaw = lerpAngle(searchState.centerYaw || cyaw, cyaw, 0.12);
   }
 
   droneRoot.rotation.y = droneState.yaw;
@@ -514,6 +616,16 @@ function sanityTests(){ try{
 (async function(){ try{
   camera.position.set(-10,8,0); camera.lookAt(0,0,0);
   const gltf=await loadSoldierGLB(); soldierGLB=gltf; soldierClips=gltf?.animations||[]; // may be null; we handle placeholder
+  
+  // Connection Rate Display
+  const connRateEl = document.getElementById('connRate');
+  if (connRateEl) {
+    setInterval(() => {
+      connRateEl.textContent = `Conn: ${responseCounter} Hz`;
+      responseCounter = 0;
+    }, 1000);
+  }
+
   setDroneType('racer'); resetMatch(); sanityTests(); tick();
 }catch(e){ console.error(e); showAlert('Init error: '+(e?.message||e)); } })();
 </script>
