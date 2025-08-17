@@ -96,10 +96,12 @@ def get_controls():
         # --- Direction Finding ---
         raw_dir = None
         is_hunting = locked_target is not None
+        # A "new hunt" starts on the frame we have a target, but the search FSM hasn't been reset yet.
+        is_newly_hunting = is_hunting and search_state.get('inited', False)
 
         if is_hunting:
             # --- HUNTING MODE ---
-            search_state['inited'] = False # Stop searching
+            search_state['inited'] = False # Stop the structured search pattern
             
             to_t_x = locked_target['position']['x'] - drone['position']['x']
             to_t_z = locked_target['position']['z'] - drone['position']['z']
@@ -149,13 +151,18 @@ def get_controls():
         if search_state.get('seekDir') is None:
             search_state['seekDir'] = {'x': math.cos(drone['yaw']), 'z': math.sin(drone['yaw'])}
         
-        smoothing_gain = 8.0 if is_hunting else 2.2
-        a = 1 - math.exp(-dt * smoothing_gain)
+        # If this is the first frame of a hunt, snap the direction immediately.
+        # Otherwise, smoothly interpolate to the new direction.
+        seek_dir = search_state['seekDir'].copy() # Work with a copy
+        if is_newly_hunting:
+            seek_dir = raw_dir
+        else:
+            smoothing_gain = 8.0 if is_hunting else 2.2
+            a = 1 - math.exp(-dt * smoothing_gain)
+            seek_dir['x'] += (raw_dir['x'] - seek_dir['x']) * a
+            seek_dir['z'] += (raw_dir['z'] - seek_dir['z']) * a
 
-        seek_dir = search_state['seekDir']
-        seek_dir['x'] += (raw_dir['x'] - seek_dir['x']) * a
-        seek_dir['z'] += (raw_dir['z'] - seek_dir['z']) * a
-
+        # Normalize and update the final desired direction
         seek_len = math.sqrt(seek_dir['x']**2 + seek_dir['z']**2)
         if seek_len > 1e-6:
             seek_dir['x'] /= seek_len

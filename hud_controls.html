@@ -67,9 +67,7 @@
 <div id="connRate">Conn: ... Hz</div>
 <div id="hud">
   <div id="joy"><div id="joyDot"></div></div>
-  <div class="legend">AI Controls (Heading ↔ / Pitch ↕)</div>
-  <div id="joyThrottle"><div id="joyDotThrottle"></div></div>
-  <div class="legend">Throttle</div>
+  <div class="legend">AI Controls (Heading ↔ / Throttle ↕)</div>
 </div>
 <div id="credit">Soldier.glb © three.js examples; CesiumAir.glb © Khronos Sample Models. Terrain/trees/rocks procedural.</div>
 
@@ -90,6 +88,7 @@ const showAlert=(msg, isSuccess=false)=>{
 const rand=(a,b)=>a+Math.random()*(b-a);
 const clamp=THREE.MathUtils.clamp; const lerp=(a,b,t)=>a+(b-a)*t; const deg=THREE.MathUtils.degToRad;
 const FT_TO_M=0.3048;
+const DRONE_FOV_DEG=70, DRONE_SIGHT_RANGE=200;
 
 // -------------------- renderer/scene/camera --------------------
 const renderer=new THREE.WebGLRenderer({antialias:true, powerPreference:'high-performance'});
@@ -117,18 +116,34 @@ const getNormalAt=(x,z)=>{ const e=1; const hL=getHeightAt(x-e,z), hR=getHeightA
 
 // -------------------- obstacles --------------------
 const obstacles=[]; const forest=new THREE.Group(); scene.add(forest);
-function placeObject(mesh,r){ for(let t=0;t<50;t++){ const x=rand(-HALF,HALF), z=rand(-HALF,HALF); if(!inBounds(x,z)) continue; const y=getHeightAt(x,z); if(getNormalAt(x,z).y<0.6) continue; let ok=true; for(const o of obstacles){ const dx=o.pos.x-x, dz=o.pos.z-z; if(dx*dx+dz*dz < (o.radius+r+4)**2){ ok=false; break; } } if(!ok) continue; mesh.position.set(x,y,z); mesh.rotation.y=Math.random()*Math.PI*2; forest.add(mesh); obstacles.push({pos:new THREE.Vector3(x,y,z), radius:r}); return; } }
+function placeObject(mesh,r){ for(let t=0;t<50;t++){ const x=rand(-HALF,HALF), z=rand(-HALF,HALF); if(!inBounds(x,z)) continue; const y=getHeightAt(x,z); if(getNormalAt(x,z).y<0.6) continue; let ok=true; for(const o of obstacles){ const dx=o.pos.x-x, dz=o.pos.z-z; if(dx*dx+dz*dz < (o.radius+r+4)**2){ ok=false; break; } } if(!ok) continue; mesh.position.set(x,y,z); mesh.rotation.y=Math.random()*Math.PI*2; forest.add(mesh); obstacles.push({pos:new THREE.Vector3(x,y,z), radius:r, mesh:mesh}); return; } }
 // trees
 const trunkGeo=new THREE.CylinderGeometry(0.6,0.9,7,6), leavesGeo=new THREE.ConeGeometry(4.2,12,8);
-for(let i=0;i<260;i++){ const g=new THREE.Group(); const t=new THREE.Mesh(trunkGeo,new THREE.MeshStandardMaterial({color:0x5a3a21, roughness:1})); const l=new THREE.Mesh(leavesGeo,new THREE.MeshStandardMaterial({color:0x1f6b3a, roughness:.95})); l.position.y=7; l.castShadow=true; t.receiveShadow=true; g.add(t,l); placeObject(g,3.8); }
+for(let i=0;i<80;i++){ const g=new THREE.Group(); const t=new THREE.Mesh(trunkGeo,new THREE.MeshStandardMaterial({color:0x5a3a21, roughness:1})); const l=new THREE.Mesh(leavesGeo,new THREE.MeshStandardMaterial({color:0x1f6b3a, roughness:.95})); l.position.y=7; l.castShadow=true; t.receiveShadow=true; g.add(t,l); placeObject(g,3.8); }
 // rocks
-const rockGeo=new THREE.DodecahedronGeometry(2.6,0); for(let i=0;i<120;i++){ const r=new THREE.Mesh(rockGeo,new THREE.MeshStandardMaterial({color:0x6a7478, roughness:1})); r.scale.setScalar(rand(0.6,1.9)); r.castShadow=r.receiveShadow=true; placeObject(r,2.6*r.scale.x); }
+const rockGeo=new THREE.DodecahedronGeometry(2.6,0); for(let i=0;i<40;i++){ const r=new THREE.Mesh(rockGeo,new THREE.MeshStandardMaterial({color:0x6a7478, roughness:1})); r.scale.setScalar(rand(0.6,1.9)); r.castShadow=r.receiveShadow=true; placeObject(r,2.6*r.scale.x); }
 
 // -------------------- drone & models --------------------
 const droneRoot=new THREE.Group(); scene.add(droneRoot);
 const bodyHolder=new THREE.Group(); droneRoot.add(bodyHolder);
-const forwardRef=new THREE.Object3D(); forwardRef.position.set(1,0,0); droneRoot.add(forwardRef);
+const raycaster = new THREE.Raycaster();
 let muzzle=null; let rotorDiscs=[]; let modelYawOffset=0;
+let sensorLight = null; // Make it globally accessible
+
+function createSensorLight() {
+  sensorLight = new THREE.SpotLight(0xFFFBE5, 8000); // Off-white/slight yellow light
+  sensorLight.angle = deg(40) / 2;
+  sensorLight.penumbra = 0.3;
+  sensorLight.distance = 80; // Increased distance
+  sensorLight.decay = 2;
+  sensorLight.castShadow = true; // Enable shadows for more definition
+  
+  // We need a target for the spotlight to look at
+  sensorLight.target = new THREE.Object3D();
+  scene.add(sensorLight);
+  scene.add(sensorLight.target);
+}
+
 function clearBody(){ while(bodyHolder.children.length) bodyHolder.remove(bodyHolder.children[0]); }
 function calibrateForwardOffset(){ try{ const save=droneRoot.rotation.y; droneRoot.rotation.y=0; scene.updateMatrixWorld(true); const ref=muzzle||forwardRef; const base=droneRoot.getWorldPosition(new THREE.Vector3()); const tip=ref.getWorldPosition(new THREE.Vector3()); const v=tip.sub(base); v.y=0; if(v.lengthSq()>1e-6){ const yaw=Math.atan2(v.z,v.x); modelYawOffset = -yaw; } else { modelYawOffset=0; } bodyHolder.rotation.set(0,modelYawOffset,0); droneRoot.rotation.y=save; }catch(e){ bodyHolder.rotation.set(0,0,0); modelYawOffset=0; } }
 function buildQuad(){ clearBody(); rotorDiscs.length=0; const body=new THREE.Mesh(new THREE.SphereGeometry(1.4,16,12), new THREE.MeshStandardMaterial({color:0x87b5ff, metalness:.2, roughness:.4})); body.castShadow=body.receiveShadow=true; bodyHolder.add(body); function arm(a){ const g=new THREE.Group(); const bar=new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.12,4.8,6), new THREE.MeshStandardMaterial({color:0x0f1d25, roughness:.8})); bar.rotation.z=Math.PI/2; const disc=new THREE.Mesh(new THREE.TorusGeometry(0.6,0.14,8,18), new THREE.MeshStandardMaterial({color:0x9fb7c6, metalness:.1, roughness:.5})); disc.position.x=2.4; disc.castShadow=disc.receiveShadow=true; rotorDiscs.push(disc); g.add(bar,disc); g.rotation.y=a; return g;} bodyHolder.add(arm(0),arm(Math.PI/2)); muzzle=new THREE.Object3D(); muzzle.position.set(1.7,0,0); body.add(muzzle); calibrateForwardOffset(); }
@@ -178,6 +193,8 @@ function updateCamera(dt){
 
 // -------------------- runners (texture-safe loader with placeholder) --------------------
 const RUNNER_COUNT=10, RUNNER_SCALE=4, RUNNER_SPEED=34; const runners=[]; let soldierGLB=null, soldierClips=[];
+const runnersGroup = new THREE.Group();
+scene.add(runnersGroup);
 async function loadSoldierGLB(){
   const candidates=[
     'https://threejs.org/examples/models/gltf/Soldier.glb',
@@ -212,10 +229,12 @@ function flatRandomSpawn() {
 function spawnRunners() {
   // Clear existing runners
   for (const r of runners) {
-    if (r.obj?.parent) scene.remove(r.obj);
     r.mixer?.stopAllAction?.();
   }
   runners.length = 0;
+  while (runnersGroup.children.length) {
+    runnersGroup.remove(runnersGroup.children[0]);
+  }
 
   const DRONE_AVOID_DIST_SQ = 60 * 60;
   const RUNNER_AVOID_DIST_SQ = 25 * 25;
@@ -275,7 +294,7 @@ function spawnRunners() {
       s.scale.set(RUNNER_SCALE, RUNNER_SCALE, RUNNER_SCALE);
     }
     s.position.copy(p);
-    scene.add(s);
+    runnersGroup.add(s);
     runners.push({ obj: s, mixer, alive: true, vel: new THREE.Vector3(), radius: 0.7 * RUNNER_SCALE, chestOffset: chest, hp: 1, hpMax: 1, hb: null });
   }
 }
@@ -297,31 +316,73 @@ function setStatus(found){ ui.status.textContent = found? 'FOUND TARGET' : 'SEAR
 // --- HUD joystick wiring ---
 const hud = {
   yaw:0, throttle:0, pitch:0, roll:0,
-  el:document.getElementById('joy'), dot:document.getElementById('joyDot'),
-  elThrottle:document.getElementById('joyThrottle'), dotThrottle:document.getElementById('joyDotThrottle')
+  el:document.getElementById('joy'), dot:document.getElementById('joyDot')
 };
 function updateHUD(){
-  // Main joystick (Heading/Pitch)
+  // Main joystick (Heading/Throttle)
   if(hud.el && hud.dot){
     const R=40; // Radius of movement
     const x = clamp(hud.yaw, -1, 1) * R;
-    const y = clamp(hud.pitch, -1, 1) * R;
+    const y = clamp(hud.throttle, -1, 1) * R;
     hud.dot.style.marginLeft = x + 'px';
     hud.dot.style.marginTop  = -y + 'px';
-  }
-  // Throttle joystick (Vertical)
-  if(hud.elThrottle && hud.dotThrottle){
-    const H = hud.elThrottle.clientHeight / 2; // Half height
-    const y = clamp(hud.throttle, -1, 1) * (H - 4); // Subtract half dot height
-    hud.dotThrottle.style.marginTop = -y + 'px';
   }
 }
 
 // -------------------- helpers: FOV & search --------------------
-const DRONE_FOV_DEG=70, DRONE_FOV_COS=Math.cos(deg(DRONE_FOV_DEG*0.5)), DRONE_SIGHT_RANGE=200;
+const DRONE_FOV_COS=Math.cos(deg(DRONE_FOV_DEG*0.5));
 function getForwardDir(){ const v=droneState.vel.clone(); v.y=0; if(v.lengthSq()>1e-8){ v.normalize(); return v; } return getForwardFromYaw(droneState.yaw||0); }
 function findVisibleTarget(){ const origin=droneRoot.position; const fwd=getForwardDir(); let best=null, score=-Infinity; for(const r of runners){ if(!r.alive) continue; const to=r.obj.position.clone().sub(origin); to.y=0; const d=to.length(); if(d<1e-3||d>DRONE_SIGHT_RANGE) continue; to.multiplyScalar(1/d); const dot=fwd.dot(to); if(dot>=DRONE_FOV_COS){ const sc=dot*2 - d*0.01; if(sc>score){ best={target:r, dist:d}; score=sc; } } } return best; }
 const SENSOR_AHEAD=75, SENSOR_SAMPLES=12; function terrainAheadMaxHeight(origin,dir,ahead=SENSOR_AHEAD,samples=SENSOR_SAMPLES){ const d=dir.clone().setY(0); if(d.lengthSq()<1e-8) return getHeightAt(origin.x,origin.z); d.normalize(); let maxH=getHeightAt(origin.x,origin.z); for(let i=1;i<=samples;i++){ const t=ahead*(i/samples); const x=origin.x+d.x*t, z=origin.z+d.z*t; const h=getHeightAt(x,z); if(h>maxH) maxH=h; } return maxH; }
+
+// Structured sweep FSM (±40°, 3s hold, 0.9s transit)
+const SWEEP_LINES = 15;
+const sweepLines = [];
+
+function createSensorSweepVisual() {
+    const material = new THREE.LineBasicMaterial({
+        color: 0x00ff00,
+        transparent: true,
+        opacity: 0.2
+    });
+    for (let i = 0; i < SWEEP_LINES; i++) {
+        const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+        const line = new THREE.Line(geometry, material);
+        raycastGroup.add(line);
+        sweepLines.push(line);
+    }
+}
+
+const objectsToIntersect = [ground, forest, runnersGroup];
+const sweepDirection = new THREE.Vector3(); // Pre-allocate vector
+
+function updateSensorSweepVisual() {
+    const origin = droneRoot.position;
+    const fwd = getForwardDir();
+    const fovRad = deg(DRONE_FOV_DEG);
+
+    for (let i = 0; i < SWEEP_LINES; i++) {
+        const angle = -fovRad / 2 + (i / (SWEEP_LINES - 1)) * fovRad;
+        sweepDirection.copy(fwd).applyAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+        
+        raycaster.set(origin, sweepDirection);
+        const intersects = raycaster.intersectObjects(objectsToIntersect, true);
+        
+        let endPoint;
+        if (intersects.length > 0) {
+            endPoint = intersects[0].point;
+        } else {
+            endPoint = origin.clone().addScaledVector(sweepDirection, DRONE_SIGHT_RANGE);
+        }
+
+        const line = sweepLines[i];
+        const positions = line.geometry.attributes.position;
+        positions.setXYZ(0, origin.x, origin.y, origin.z);
+        positions.setXYZ(1, endPoint.x, endPoint.y, endPoint.z);
+        positions.needsUpdate = true;
+    }
+}
+
 
 // Structured sweep FSM (±40°, 3s hold, 0.9s transit)
 const SWEEP_HOLD=3.0, SWEEP_TRANSIT=0.9, SWEEP_ANGLE_DEG=40; let searchState={inited:false, centerYaw:0, side:1, timer:0, phase:'hold', yawTarget:0}; let lockedTarget=null;
@@ -349,7 +410,7 @@ async function getAIControls(dt) {
   // --- Client-Side Target Acquisition ---
   // On every frame, find the best visible target. This is a stateless approach.
   const visibleTargetData = findVisibleTarget();
-  const currentTarget = visibleTargetData ? visibleTargetData.target : null;
+  const currentFrameTarget = visibleTargetData ? visibleTargetData.target : null;
 
   // Now, send the authoritative state to the server.
   const fwd = getForwardFromYaw(droneState.yaw);
@@ -363,9 +424,9 @@ async function getAIControls(dt) {
       speed: droneState.speed,
       maxTurn: droneState.maxTurn,
     },
-    lockedTarget: currentTarget ? {
-      position: currentTarget.obj.position,
-      velocity: currentTarget.vel,
+    lockedTarget: currentFrameTarget ? {
+      position: currentFrameTarget.obj.position,
+      velocity: currentFrameTarget.vel,
     } : null,
     terrain: {
       height_at_drone: getHeightAt(droneRoot.position.x, droneRoot.position.z),
@@ -505,6 +566,20 @@ function updateDrone(dt){
   }
 
   droneRoot.rotation.y = droneState.yaw;
+
+  if (sensorLight) {
+    const fwd = getForwardFromYaw(droneState.yaw);
+    const lightPos = droneRoot.position.clone().addScaledVector(fwd, 0.75);
+    sensorLight.position.copy(lightPos);
+
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = fwd.clone().cross(up).normalize();
+    const pitchAngle = deg(-35);
+    const finalDirection = fwd.clone().applyAxisAngle(right, pitchAngle);
+
+    // The target's position determines where the light points.
+    sensorLight.target.position.copy(lightPos.add(finalDirection));
+  }
 }
 
 // -------------------- runners update --------------------
@@ -576,7 +651,7 @@ function tryShoot(dt){
 
       if (hit.hp <= 0) {
         hit.alive = false;
-        scene.remove(hit.obj);
+        runnersGroup.remove(hit.obj);
         hit.mixer?.stopAllAction?.();
         if (lockedTarget === hit) {
           lockedTarget = null;
@@ -603,7 +678,19 @@ function resetMatch(){ const p=flatRandomSpawn(null,0); droneRoot.position.copy(
 function startRun(){ runKills=0; running=true; runStart=performance.now(); }
 function endRun(){ running=false; const t=performance.now()-runStart; if(bestMs==null||t<bestMs){ bestMs=t; localStorage.setItem(LS.best,String(bestMs)); } resets++; localStorage.setItem(LS.resets,String(resets)); }
 
-function tick(){ const dt=clock.getDelta()*timeScale; updateDrone(dt); updateRunners(dt); updateCamera(dt); updateHUD(); tryShoot(dt); updateTracers(dt); if(running) ui.time.textContent=fmt(performance.now()-runStart); renderer.render(scene,camera); requestAnimationFrame(tick); }
+function tick(){
+  const dt=clock.getDelta()*timeScale;
+  updateDrone(dt);
+  updateRunners(dt);
+  updateCamera(dt);
+  updateHUD();
+  tryShoot(dt);
+  updateTracers(dt);
+  if(running) ui.time.textContent=fmt(performance.now()-runStart);
+
+  renderer.render(scene,camera);
+  requestAnimationFrame(tick);
+}
 
 // -------------------- dev sanity tests (non-blocking, console only) --------------------
 function sanityTests(){ try{
@@ -616,6 +703,8 @@ function sanityTests(){ try{
 (async function(){ try{
   camera.position.set(-10,8,0); camera.lookAt(0,0,0);
   const gltf=await loadSoldierGLB(); soldierGLB=gltf; soldierClips=gltf?.animations||[]; // may be null; we handle placeholder
+  
+  createSensorLight(); // Initialize the sensor light
   
   // Connection Rate Display
   const connRateEl = document.getElementById('connRate');
