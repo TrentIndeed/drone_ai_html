@@ -153,7 +153,7 @@ function createScannerEffect() {
   // 3. Create the spotlight to project the texture
   const light = new THREE.SpotLight(0xFFFFFF, 12000); // Very bright white
   light.map = scannerEffect.texture; // Project the texture
-  light.angle = deg(40) / 2;
+  light.angle = deg(80) / 2;
   light.penumbra = 0.3;
   light.distance = 80;
   light.decay = 2;
@@ -166,7 +166,7 @@ function createScannerEffect() {
 
 function createSensorLight() {
   sensorLight = new THREE.SpotLight(0xFFFBE5, 8000); // Off-white/slight yellow light
-  sensorLight.angle = deg(40) / 2;
+  sensorLight.angle = deg(80) / 2;
   sensorLight.penumbra = 0.3;
   sensorLight.distance = 80; // Increased distance
   sensorLight.decay = 2;
@@ -331,6 +331,9 @@ function spawnRunners() {
     runnersGroup.add(s);
     runners.push({ obj: s, mixer, alive: true, vel: new THREE.Vector3(), radius: 0.7 * RUNNER_SCALE, chestOffset: chest, hp: 1, hpMax: 1, hb: null });
   }
+  
+  // Sanity check to ensure all targets spawned
+  console.assert(runners.length === RUNNER_COUNT, `Target spawn check failed: Expected ${RUNNER_COUNT}, but found ${runners.length}`);
 }
 
 // simple health bar helper
@@ -366,7 +369,53 @@ function updateHUD(){
 // -------------------- helpers: FOV & search --------------------
 const DRONE_FOV_COS=Math.cos(deg(DRONE_FOV_DEG*0.5));
 function getForwardDir(){ const v=droneState.vel.clone(); v.y=0; if(v.lengthSq()>1e-8){ v.normalize(); return v; } return getForwardFromYaw(droneState.yaw||0); }
-function findVisibleTarget(){ const origin=droneRoot.position; const fwd=getForwardDir(); let best=null, score=-Infinity; for(const r of runners){ if(!r.alive) continue; const to=r.obj.position.clone().sub(origin); to.y=0; const d=to.length(); if(d<1e-3||d>DRONE_SIGHT_RANGE) continue; to.multiplyScalar(1/d); const dot=fwd.dot(to); if(dot>=DRONE_FOV_COS){ const sc=dot*2 - d*0.01; if(sc>score){ best={target:r, dist:d}; score=sc; } } } return best; }
+
+function findVisibleTarget() {
+  if (!sensorLight) return null; // No light, no vision
+
+  // 1. Calculate spotlight's current properties based on drone's yaw
+  const fwd = getForwardFromYaw(droneState.yaw);
+  const spotOrigin = droneRoot.position.clone().addScaledVector(fwd, 0.75);
+
+  const up = new THREE.Vector3(0, 1, 0);
+  const right = fwd.clone().cross(up).normalize();
+  const pitchAngle = deg(-35);
+  const spotDirection = fwd.clone().applyAxisAngle(right, pitchAngle);
+
+  // 2. Get spotlight parameters for the check
+  const spotAngleCos = Math.cos(sensorLight.angle);
+  const spotRange = sensorLight.distance;
+
+  let best = null, score = -Infinity;
+  for (const r of runners) {
+    if (!r.alive) continue;
+
+    // Use the runner's chest as the target point for better accuracy
+    const targetPos = r.obj.position.clone().add(new THREE.Vector3(0, r.chestOffset || 1, 0));
+    const toTarget = targetPos.sub(spotOrigin);
+
+    const dist = toTarget.length();
+
+    // 3. Check if target is within the spotlight's effective range
+    if (dist < 1e-3 || dist > spotRange) continue;
+
+    toTarget.normalize();
+
+    // 4. Check if target is within the spotlight's cone angle using dot product
+    const dot = spotDirection.dot(toTarget);
+
+    if (dot >= spotAngleCos) {
+      // Scoring: prioritize targets closer to the center of the cone and closer to the drone
+      const sc = dot * 2 - dist * 0.01;
+      if (sc > score) {
+        best = { target: r, dist: dist };
+        score = sc;
+      }
+    }
+  }
+  return best;
+}
+
 const SENSOR_AHEAD=75, SENSOR_SAMPLES=12; function terrainAheadMaxHeight(origin,dir,ahead=SENSOR_AHEAD,samples=SENSOR_SAMPLES){ const d=dir.clone().setY(0); if(d.lengthSq()<1e-8) return getHeightAt(origin.x,origin.z); d.normalize(); let maxH=getHeightAt(origin.x,origin.z); for(let i=1;i<=samples;i++){ const t=ahead*(i/samples); const x=origin.x+d.x*t, z=origin.z+d.z*t; const h=getHeightAt(x,z); if(h>maxH) maxH=h; } return maxH; }
 
 // Structured sweep FSM (±40°, 3s hold, 0.9s transit)
@@ -441,12 +490,24 @@ let serverError = false;
 let responseCounter = 0;
 
 async function getAIControls(dt) {
-  // --- Client-Side Target Acquisition ---
-  // On every frame, find the best visible target. This is a stateless approach.
-  const visibleTargetData = findVisibleTarget();
-  const currentFrameTarget = visibleTargetData ? visibleTargetData.target : null;
+  // --- Stateful Target Acquisition ---
 
-  // Now, send the authoritative state to the server.
+  // 1. If we have a target but it's dead, clear the lock.
+  if (lockedTarget && !lockedTarget.alive) {
+    lockedTarget = null;
+  }
+
+  // 2. If we don't have a target, try to find one within the spotlight.
+  if (!lockedTarget) {
+    const visibleTargetData = findVisibleTarget();
+    if (visibleTargetData) {
+      lockedTarget = visibleTargetData.target; // Lock on!
+    }
+  }
+  
+  // Now, `lockedTarget` persists until the target is dead.
+
+  // 3. Send the current state to the server.
   const fwd = getForwardFromYaw(droneState.yaw);
   const payload = {
     dt: dt,
@@ -458,9 +519,10 @@ async function getAIControls(dt) {
       speed: droneState.speed,
       maxTurn: droneState.maxTurn,
     },
-    lockedTarget: currentFrameTarget ? {
-      position: currentFrameTarget.obj.position,
-      velocity: currentFrameTarget.vel,
+    // Send the PERSISTENT locked target to the server
+    lockedTarget: lockedTarget ? { 
+      position: lockedTarget.obj.position,
+      velocity: lockedTarget.vel,
     } : null,
     terrain: {
       height_at_drone: getHeightAt(droneRoot.position.x, droneRoot.position.z),
@@ -644,7 +706,22 @@ function updateDrone(dt){
 
 // -------------------- runners update --------------------
 function faceRunner(obj,dir){ const d=new THREE.Vector3(dir.x,0,dir.z); if(d.lengthSq()<1e-8) return; d.normalize(); const yaw=Math.atan2(d.x, d.z) + Math.PI; obj.rotation.set(0,yaw,0); }
-function updateRunners(dt){ for(const r of runners){ if(!r.alive) continue; r.mixer?.update?.(dt); const away=r.obj.position.clone().sub(droneRoot.position); away.y=0; const len=away.length(); const dir=(len<1e-3? new THREE.Vector3(1,0,0) : away.multiplyScalar(1/len)); const steer=steerAvoid(r.obj.position,dir); dir.add(steer).normalize(); r.vel?.lerp? r.vel.lerp(dir.multiplyScalar(RUNNER_SPEED), 1-Math.exp(-dt*8)) : (r.vel=dir.clone().multiplyScalar(RUNNER_SPEED)); r.obj.position.addScaledVector(r.vel, dt); if(!inBounds(r.obj.position.x,r.obj.position.z)){ r.obj.position.x=clamp(r.obj.position.x,-HALF,HALF); r.obj.position.z=clamp(r.obj.position.z,-HALF,HALF); r.vel.multiplyScalar(0.2);} r.obj.position.y=getHeightAt(r.obj.position.x,r.obj.position.z);
+function updateRunners(dt){ for(const r of runners){ if(!r.alive) continue; r.mixer?.update?.(dt); const away=r.obj.position.clone().sub(droneRoot.position); away.y=0; const len=away.length(); const dir=(len<1e-3? new THREE.Vector3(1,0,0) : away.multiplyScalar(1/len)); const steer=steerAvoid(r.obj.position,dir); dir.add(steer).normalize(); r.vel?.lerp? r.vel.lerp(dir.multiplyScalar(RUNNER_SPEED), 1-Math.exp(-dt*8)) : (r.vel=dir.clone().multiplyScalar(RUNNER_SPEED)); r.obj.position.addScaledVector(r.vel, dt); 
+    
+    // Drone-style boundary collision for runners
+    let boundaryNormal = new THREE.Vector3(0,0,0);
+    if(r.obj.position.x > HALF) boundaryNormal.x = 1;
+    else if(r.obj.position.x < -HALF) boundaryNormal.x = -1;
+    if(r.obj.position.z > HALF) boundaryNormal.z = 1;
+    else if(r.obj.position.z < -HALF) boundaryNormal.z = -1;
+    
+    if(boundaryNormal.lengthSq() > 0){
+      boundaryNormal.normalize();
+      const vn = r.vel.dot(boundaryNormal);
+      if(vn > 0) r.vel.addScaledVector(boundaryNormal, -vn * 1.5); // Reflect velocity
+    }
+
+    r.obj.position.y=getHeightAt(r.obj.position.x,r.obj.position.z);
     if(!r.hb){ r.hb=makeHealthBar(); r.hb.position.set(0, r.chestOffset*0.6, 0.2); r.obj.add(r.hb); }
     faceRunner(r.obj, r.vel);
   } }

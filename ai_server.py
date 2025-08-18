@@ -77,7 +77,6 @@ def steer_avoid(pos, vel, obstacles):
 
 @app.route('/get_controls', methods=['POST'])
 def get_controls():
-    global search_state
     try:
         data = request.json
         if not data:
@@ -88,6 +87,9 @@ def get_controls():
         terrain = data.get('terrain')
         obstacles = data.get('obstacles', [])
         dt = data.get('dt')
+        
+        # CRITICAL FIX: Load the search state from the client, making the server stateless.
+        search_state = data.get('searchState', { 'inited': False })
 
         if not all([drone, terrain, dt is not None]):
             app.logger.error(f"Incomplete data received")
@@ -148,16 +150,16 @@ def get_controls():
         # --- Unified Steering & Smoothing ---
         drone_status = 'HUNTING' if is_hunting else 'SEARCHING'
         
-        if search_state.get('seekDir') is None:
-            search_state['seekDir'] = {'x': math.cos(drone['yaw']), 'z': math.sin(drone['yaw'])}
+        seek_dir = search_state.get('seekDir')
+        if seek_dir is None:
+            seek_dir = {'x': math.cos(drone['yaw']), 'z': math.sin(drone['yaw'])}
         
         # If this is the first frame of a hunt, snap the direction immediately.
         # Otherwise, smoothly interpolate to the new direction.
-        seek_dir = search_state['seekDir'].copy() # Work with a copy
         if is_newly_hunting:
             seek_dir = raw_dir
         else:
-            smoothing_gain = 8.0 if is_hunting else 2.2
+            smoothing_gain = 8.0 if is_hunting else 2.2 # Restored original search turning speed
             a = 1 - math.exp(-dt * smoothing_gain)
             seek_dir['x'] += (raw_dir['x'] - seek_dir['x']) * a
             seek_dir['z'] += (raw_dir['z'] - seek_dir['z']) * a
@@ -184,7 +186,11 @@ def get_controls():
         # --- AI CONTROLS CALCULATION ---
         desired_yaw = math.atan2(desired_dir['z'], desired_dir['x'])
         yaw_error = wrap_angle(desired_yaw - drone['yaw'])
-        commanded_yaw_rate = clamp(yaw_error / max(dt, 1e-5), -drone['maxTurn'], drone['maxTurn'])
+        
+        # Use a proportional controller for yaw rate instead of a bang-bang controller
+        # This provides smooth, stable turning and eliminates oscillations.
+        yaw_gain = 24.0 if is_hunting else 12.0 # Increased gain for faster turning
+        commanded_yaw_rate = clamp(yaw_error * yaw_gain, -drone['maxTurn'], drone['maxTurn'])
         hud_yaw_raw = commanded_yaw_rate / drone['maxTurn']
 
         ground_ref = max(terrain['height_at_drone'], terrain['ahead_max_height'])
@@ -197,7 +203,12 @@ def get_controls():
         fwd_x = math.cos(drone['yaw'])
         fwd_z = math.sin(drone['yaw'])
         forward_speed = drone['velocity']['x'] * fwd_x + drone['velocity']['z'] * fwd_z
-        accel_err = drone['speed'] - forward_speed
+        
+        # Reduce desired speed when the drone needs to turn sharply to avoid overshooting
+        turn_reduction = 1.0 - clamp(abs(yaw_error) / math.pi, 0, 1) # 1.0 = straight, 0.0 = 180 deg error
+        desired_speed = drone['speed'] * turn_reduction if is_hunting else drone['speed']
+        
+        accel_err = desired_speed - forward_speed
         power_command = clamp(accel_err * 0.1, -1, 1)
 
         hud_pitch_raw = power_command
@@ -206,7 +217,12 @@ def get_controls():
         # --- SMOOTHING ---
         smoothing_factor = 1.0 - math.exp(-dt * 10.0)
         
-        smoothed_yaw = lerp_angle(control_state['last_yaw'], hud_yaw_raw, smoothing_factor)
+        # If it's a new hunt, snap the yaw command instead of smoothing it to be more responsive.
+        if is_newly_hunting:
+            smoothed_yaw = hud_yaw_raw
+        else:
+            smoothed_yaw = lerp_angle(control_state['last_yaw'], hud_yaw_raw, smoothing_factor)
+
         smoothed_throttle = control_state['last_throttle'] + (hud_throttle_raw - control_state['last_throttle']) * smoothing_factor
         smoothed_pitch = control_state['last_pitch'] + (hud_pitch_raw - control_state['last_pitch']) * smoothing_factor
 
