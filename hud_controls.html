@@ -104,12 +104,32 @@ scene.add(new THREE.HemisphereLight(0xbdd7ff, 0x32424a, 0.65));
 const sun=new THREE.DirectionalLight(0xffffff,1.05); sun.position.set(-200,250,100); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); scene.add(sun);
 
 // -------------------- terrain --------------------
-const simplex=new SimplexNoise();
-const TERRAIN_SIZE=900, TERRAIN_SEG=256, TERRAIN_SCALE=42; const HALF=TERRAIN_SIZE*0.48;
-const terrainGeo=new THREE.PlaneGeometry(TERRAIN_SIZE,TERRAIN_SIZE,TERRAIN_SEG,TERRAIN_SEG); terrainGeo.rotateX(-Math.PI/2);
+let simplex = new SimplexNoise();
+const TERRAIN_SIZE=450, TERRAIN_SEG=256, TERRAIN_SCALE=42; const HALF=TERRAIN_SIZE*0.48;
+const terrainGeo=new THREE.PlaneGeometry(TERRAIN_SIZE,TERRAIN_SIZE,TERRAIN_SEG,TERRAIN_SEG); 
+terrainGeo.rotateX(-Math.PI/2);
+let ground = null;
+
+function generateTerrain() {
+    simplex = new SimplexNoise();
+    const pos = terrainGeo.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i), z = pos.getZ(i);
+        pos.setY(i, heightFn(x, z));
+    }
+    terrainGeo.computeVertexNormals();
+    if (ground) {
+        ground.geometry.dispose();
+        ground.geometry = terrainGeo;
+    } else {
+        ground = new THREE.Mesh(terrainGeo, new THREE.MeshStandardMaterial({ color: 0x2c5e33, roughness: .95 }));
+        ground.receiveShadow = true;
+        scene.add(ground);
+    }
+}
+
 function heightFn(x,z){ const nx=x/220, nz=z/220; const e=simplex.noise(nx,nz)*0.6 + simplex.noise(nx*2.31,nz*2.31)*0.25 + simplex.noise(nx*5.13,nz*5.13)*0.15; return e*TERRAIN_SCALE; }
-const pos=terrainGeo.attributes.position; for(let i=0;i<pos.count;i++){ const x=pos.getX(i), z=pos.getZ(i); pos.setY(i, heightFn(x,z)); } terrainGeo.computeVertexNormals();
-const ground=new THREE.Mesh(terrainGeo,new THREE.MeshStandardMaterial({color:0x2c5e33, roughness:.95})); ground.receiveShadow=true; scene.add(ground);
+
 const getHeightAt=(x,z)=>heightFn(x,z);
 const inBounds=(x,z)=>Math.abs(x)<=HALF&&Math.abs(z)<=HALF;
 const getNormalAt=(x,z)=>{ const e=1; const hL=getHeightAt(x-e,z), hR=getHeightAt(x+e,z), hD=getHeightAt(x,z-e), hU=getHeightAt(x,z+e); return new THREE.Vector3(hL-hR,2,hD-hU).normalize(); };
@@ -212,7 +232,7 @@ function setDroneType(k){ if(k==='quad') buildQuad(); else if(k==='military') bu
 setDroneType('racer');
 
 // -------------------- drone state & camera --------------------
-const droneState={ vel:new THREE.Vector3(), vy:0, yaw:0, targetAlt:12, speed:120, maxTurn:deg(360) };
+const droneState={ vel:new THREE.Vector3(), vy:0, yaw:0, targetAlt:12, speed:120, maxTurn:deg(720) };
 droneRoot.position.set(0,40,0);
 let rotorSpin=0;
 function getForwardFromYaw(y){ return new THREE.Vector3(Math.cos(y),0,Math.sin(y)); }
@@ -481,8 +501,8 @@ function steerAvoid(pos,dir){ const ahead=pos.clone().addScaledVector(dir,6); le
 
 // -------------------- drone update (aero-driven) --------------------
 let prevYaw=0, prevY=0; let yawRateFilt=0, vSpeedFilt=0, latAccelFilt=0;
-const LEAN={ maxPitch:deg(22), maxRoll:deg(32), yawSlip:deg(4), yawFilter:12, vzFilter:10, latFilter:10, rollFromYaw:1.8, rollFromLat:1.1, pitchFromVz:1.1 };
-const TILT={ kp:22, kd:10 }; const AERO={ accelPitch:90, accelRoll:100, speedGain:5.0, drag:0.36, maxSpeedScale:1.3 };
+const LEAN={ maxPitch:deg(22), maxRoll:deg(32), yawSlip:deg(4), yawFilter:24, vzFilter:10, latFilter:10, rollFromYaw:1.8, rollFromLat:1.1, pitchFromVz:1.1 };
+const TILT={ kp:44, kd:10 }; const AERO={ accelPitch:90, accelRoll:100, speedGain:5.0, drag:0.36, maxSpeedScale:1.3 };
 let tilt={ pitch:0, roll:0, pitchVel:0, rollVel:0 };
 const DRONE_CLEAR=3.0;
 let lastControls = { yaw: 0, throttle: 0, pitch: 0, roll: 0 };
@@ -810,8 +830,29 @@ function tryShoot(dt){
 }
 
 // -------------------- flow --------------------
-function resetMatch(){ const p=flatRandomSpawn(null,0); droneRoot.position.copy(p.add(new THREE.Vector3(0,8,0))); const seedYaw=Math.random()*Math.PI*2; droneState.yaw=seedYaw; const v0=new THREE.Vector3(Math.cos(seedYaw),0,Math.sin(seedYaw)).multiplyScalar(droneState.speed*0.5); droneState.vel.copy(v0);
-  droneState.vy = 0; const yawVel0=Math.atan2(v0.z,v0.x); droneRoot.rotation.set(0,yawVel0,0); prevYaw=droneState.yaw; prevY=droneRoot.position.y; yawRateFilt=0; vSpeedFilt=0; latAccelFilt=0; tilt.pitch=tilt.roll=tilt.pitchVel=tilt.rollVel=0; spawnRunners(); startRun(); updateUI(); setStatus(false); searchState.inited=false; }
+function resetMatch(){ 
+  generateTerrain();
+  const p=flatRandomSpawn(null,0); 
+  droneRoot.position.copy(p.add(new THREE.Vector3(0,8,0))); 
+  const seedYaw=Math.random()*Math.PI*2; 
+  droneState.yaw=seedYaw; 
+  const v0=new THREE.Vector3(Math.cos(seedYaw),0,Math.sin(seedYaw)).multiplyScalar(droneState.speed*0.5); 
+  droneState.vel.copy(v0);
+  droneState.vy = 0; 
+  const yawVel0=Math.atan2(v0.z,v0.x); 
+  droneRoot.rotation.set(0,yawVel0,0); 
+  prevYaw=droneState.yaw; 
+  prevY=droneRoot.position.y; 
+  yawRateFilt=0; 
+  vSpeedFilt=0; 
+  latAccelFilt=0; 
+  tilt.pitch=tilt.roll=tilt.pitchVel=tilt.rollVel=0; 
+  spawnRunners(); 
+  startRun(); 
+  updateUI(); 
+  setStatus(false); 
+  searchState.inited=false; 
+}
 function startRun(){ runKills=0; running=true; runStart=performance.now(); }
 function endRun(){ running=false; const t=performance.now()-runStart; if(bestMs==null||t<bestMs){ bestMs=t; localStorage.setItem(LS.best,String(bestMs)); } resets++; localStorage.setItem(LS.resets,String(resets)); }
 

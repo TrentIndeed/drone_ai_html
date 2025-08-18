@@ -10,7 +10,7 @@ LEAN = { 'maxPitch': math.radians(22) }
 SWEEP_HOLD = 3.0
 SWEEP_TRANSIT = 0.9
 SWEEP_ANGLE_DEG = 40
-HALF = 900 * 0.48 # TERRAIN_SIZE * 0.48
+HALF = 450 * 0.48 # TERRAIN_SIZE * 0.48
 
 # --- Global state for the search FSM ---
 search_state = {
@@ -101,26 +101,7 @@ def get_controls():
         # A "new hunt" starts on the frame we have a target, but the search FSM hasn't been reset yet.
         is_newly_hunting = is_hunting and search_state.get('inited', False)
 
-        if is_hunting:
-            # --- HUNTING MODE ---
-            search_state['inited'] = False # Stop the structured search pattern
-            
-            to_t_x = locked_target['position']['x'] - drone['position']['x']
-            to_t_z = locked_target['position']['z'] - drone['position']['z']
-            
-            lead_x = locked_target['velocity']['x'] * 0.6
-            lead_z = locked_target['velocity']['z'] * 0.6
-
-            final_dir_x = to_t_x + lead_x
-            final_dir_z = to_t_z + lead_z
-
-            len_sq = final_dir_x**2 + final_dir_z**2
-            if len_sq > 1e-6:
-                inv_len = 1 / math.sqrt(len_sq)
-                raw_dir = {'x': final_dir_x * inv_len, 'z': final_dir_z * inv_len}
-            else:
-                raw_dir = {'x': math.cos(drone['yaw']), 'z': math.sin(drone['yaw'])}
-        else:
+        if not is_hunting:
             # --- SEARCHING MODE ---
             if not search_state.get('inited', False):
                 search_state['inited'] = True
@@ -146,6 +127,25 @@ def get_controls():
             amp = math.radians(SWEEP_ANGLE_DEG)
             yaw_t = wrap_angle(search_state['centerYaw'] + search_state['side'] * amp)
             raw_dir = {'x': math.cos(yaw_t), 'z': math.sin(yaw_t)}
+        else:
+            # --- HUNTING MODE ---
+            search_state['inited'] = False # Stop the structured search pattern
+            
+            to_t_x = locked_target['position']['x'] - drone['position']['x']
+            to_t_z = locked_target['position']['z'] - drone['position']['z']
+            
+            lead_x = locked_target['velocity']['x'] * 0.6
+            lead_z = locked_target['velocity']['z'] * 0.6
+
+            final_dir_x = to_t_x + lead_x
+            final_dir_z = to_t_z + lead_z
+
+            len_sq = final_dir_x**2 + final_dir_z**2
+            if len_sq > 1e-6:
+                inv_len = 1 / math.sqrt(len_sq)
+                raw_dir = {'x': final_dir_x * inv_len, 'z': final_dir_z * inv_len}
+            else:
+                raw_dir = {'x': math.cos(drone['yaw']), 'z': math.sin(drone['yaw'])}
 
         # --- Unified Steering & Smoothing ---
         drone_status = 'HUNTING' if is_hunting else 'SEARCHING'
@@ -189,7 +189,7 @@ def get_controls():
         
         # Use a proportional controller for yaw rate instead of a bang-bang controller
         # This provides smooth, stable turning and eliminates oscillations.
-        yaw_gain = 24.0 if is_hunting else 12.0 # Increased gain for faster turning
+        yaw_gain = 48.0 if is_hunting else 24.0 # Increased gain for faster turning
         commanded_yaw_rate = clamp(yaw_error * yaw_gain, -drone['maxTurn'], drone['maxTurn'])
         hud_yaw_raw = commanded_yaw_rate / drone['maxTurn']
 
