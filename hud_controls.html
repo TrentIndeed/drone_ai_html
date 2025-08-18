@@ -129,6 +129,40 @@ const bodyHolder=new THREE.Group(); droneRoot.add(bodyHolder);
 const raycaster = new THREE.Raycaster();
 let muzzle=null; let rotorDiscs=[]; let modelYawOffset=0;
 let sensorLight = null; // Make it globally accessible
+let scannerEffect = {
+  light: null,
+  texture: null,
+  canvas: null,
+  context: null,
+  line_width: 2 // Thinner line
+};
+
+function createScannerEffect() {
+  // 1. Create a canvas and context to draw the line
+  const canvas = document.createElement('canvas');
+  canvas.width = 64;
+  canvas.height = 64;
+  const context = canvas.getContext('2d');
+  
+  scannerEffect.canvas = canvas;
+  scannerEffect.context = context;
+
+  // 2. Create the texture from the canvas
+  scannerEffect.texture = new THREE.CanvasTexture(canvas);
+
+  // 3. Create the spotlight to project the texture
+  const light = new THREE.SpotLight(0xFFFFFF, 12000); // Very bright white
+  light.map = scannerEffect.texture; // Project the texture
+  light.angle = deg(40) / 2;
+  light.penumbra = 0.3;
+  light.distance = 80;
+  light.decay = 2;
+  
+  light.target = new THREE.Object3D();
+  scene.add(light);
+  scene.add(light.target);
+  scannerEffect.light = light;
+}
 
 function createSensorLight() {
   sensorLight = new THREE.SpotLight(0xFFFBE5, 8000); // Off-white/slight yellow light
@@ -570,15 +604,41 @@ function updateDrone(dt){
   if (sensorLight) {
     const fwd = getForwardFromYaw(droneState.yaw);
     const lightPos = droneRoot.position.clone().addScaledVector(fwd, 0.75);
-    sensorLight.position.copy(lightPos);
-
+    
     const up = new THREE.Vector3(0, 1, 0);
     const right = fwd.clone().cross(up).normalize();
     const pitchAngle = deg(-35);
     const finalDirection = fwd.clone().applyAxisAngle(right, pitchAngle);
+    const targetPos = lightPos.clone().add(finalDirection);
 
-    // The target's position determines where the light points.
-    sensorLight.target.position.copy(lightPos.add(finalDirection));
+    // Update main sensor light
+    sensorLight.position.copy(lightPos);
+    sensorLight.target.position.copy(targetPos);
+
+    // Update scanner line light
+    if (scannerEffect.light && scannerEffect.context) {
+      scannerEffect.light.position.copy(lightPos);
+      scannerEffect.light.target.position.copy(targetPos);
+      
+      // Animate by redrawing the canvas texture each frame
+      const { context, canvas, texture, line_width } = scannerEffect;
+      
+      // Clear canvas
+      context.fillStyle = 'black';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Calculate line position based on drone's heading input
+      const scanRange = canvas.width - line_width;
+      // Map hud.yaw from [-1, 1] to [0, 1] and then to the scan range
+      const lineX = (hud.yaw * 0.5 + 0.5) * scanRange;
+      
+      // Draw new line
+      context.fillStyle = 'white';
+      context.fillRect(lineX, 0, line_width, canvas.height);
+      
+      // Tell three.js to update the texture
+      texture.needsUpdate = true;
+    }
   }
 }
 
@@ -705,6 +765,7 @@ function sanityTests(){ try{
   const gltf=await loadSoldierGLB(); soldierGLB=gltf; soldierClips=gltf?.animations||[]; // may be null; we handle placeholder
   
   createSensorLight(); // Initialize the sensor light
+  createScannerEffect(); // Initialize the scanner line effect
   
   // Connection Rate Display
   const connRateEl = document.getElementById('connRate');
